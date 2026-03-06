@@ -799,6 +799,7 @@ impl SetupWizard {
                     "openai" => "OpenAI",
                     "ollama" => "Ollama (local)",
                     "openai_compatible" => "OpenAI-compatible endpoint",
+                    "codex" => "ChatGPT Codex (subscription OAuth)",
                     other => other,
                 }
             };
@@ -807,7 +808,7 @@ impl SetupWizard {
 
             let is_known = matches!(
                 current.as_str(),
-                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible"
+                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible" | "codex"
             );
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
@@ -821,6 +822,7 @@ impl SetupWizard {
                     "openai" => return self.setup_openai().await,
                     "ollama" => return self.setup_ollama(),
                     "openai_compatible" => return self.setup_openai_compatible().await,
+                    "codex" => return self.setup_codex().await,
                     _ => {
                         return Err(SetupError::Config(format!(
                             "Unhandled provider: {}",
@@ -848,6 +850,7 @@ impl SetupWizard {
             "Ollama           - local models, no API key needed",
             "OpenRouter       - 200+ models via single API key",
             "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, etc.)",
+            "ChatGPT Codex    - subscriber models via ChatGPT OAuth",
         ];
 
         let choice = select_one("Provider:", options).map_err(SetupError::Io)?;
@@ -859,6 +862,7 @@ impl SetupWizard {
             3 => self.setup_ollama()?,
             4 => self.setup_openrouter().await?,
             5 => self.setup_openai_compatible().await?,
+            6 => self.setup_codex().await?,
             _ => return Err(SetupError::Config("Invalid provider selection".to_string())),
         }
 
@@ -1114,7 +1118,148 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 4: Model selection.
+    /// ChatGPT Codex provider setup: full PKCE OAuth flow against auth.openai.com.
+    ///
+    /// Authenticates the user via their ChatGPT account (Plus/Pro/Team/Enterprise)
+    /// using the same OAuth PKCE flow as the official OpenAI Codex CLI. On
+    /// success the access and refresh tokens are stored in the encrypted secrets
+    /// store so IronClaw can call the OpenAI Chat Completions API with subscriber
+    /// access (no API key required).
+    async fn setup_codex(&mut self) -> Result<(), SetupError> {
+        use crate::cli::oauth_defaults;
+        use tokio::net::TcpListener;
+
+        self.settings.llm_backend = Some("codex".to_string());
+        if self.settings.selected_model.is_some() {
+            self.settings.selected_model = None;
+        }
+
+        // Check whether we already have a stored token.
+        if let Ok(existing) = std::env::var("OPENAI_CODEX_ACCESS_TOKEN") {
+            print_info(&format!(
+                "OPENAI_CODEX_ACCESS_TOKEN found: {}",
+                mask_api_key(&existing)
+            ));
+            if confirm("Use this token?", true).map_err(SetupError::Io)? {
+                if let Ok(ctx) = self.init_secrets_context().await {
+                    let token = SecretString::from(existing.clone());
+                    if let Err(e) = ctx.save_secret("llm_codex_access_token", &token).await {
+                        tracing::warn!("Failed to persist Codex token to secrets: {}", e);
+                    }
+                }
+                print_success("ChatGPT Codex configured (from env)");
+                return Ok(());
+            }
+        }
+
+        println!();
+        print_info("ChatGPT Codex uses your ChatGPT Plus/Pro/Team subscription.");
+        print_info("You need a ChatGPT account to continue.");
+        println!();
+
+        // The OpenAI Codex CLI registers its redirect URI on port 1455 (not the
+        // shared IronClaw port 9876), so we must bind port 1455 here to match the
+        // registered redirect URI for client_id OPENAI_CODEX_CLIENT_ID.
+        const CODEX_CALLBACK_PORT: u16 = 1455;
+        const OPENAI_CODEX_CLIENT_ID: &str = "TdJIcbe16WoTHtN95nyywh5E4yOo6ItG";
+        const OPENAI_AUTH_URL: &str = "https://auth.openai.com/authorize";
+        const OPENAI_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+
+        let host = oauth_defaults::callback_host();
+        let redirect_uri = format!("http://{}:{}/callback", host, CODEX_CALLBACK_PORT);
+
+        // Build PKCE authorization URL
+        let oauth_result = oauth_defaults::build_oauth_url(
+            OPENAI_AUTH_URL,
+            OPENAI_CODEX_CLIENT_ID,
+            &redirect_uri,
+            &[
+                "openid".to_string(),
+                "email".to_string(),
+                "profile".to_string(),
+                "offline_access".to_string(),
+                "model.read".to_string(),
+                "model.request".to_string(),
+                "openai-api.all".to_string(),
+            ],
+            true, // use PKCE
+            &std::collections::HashMap::new(),
+        );
+
+        // Bind the callback listener on port 1455
+        let bind_addr = format!("{}:{}", host, CODEX_CALLBACK_PORT);
+        let listener = TcpListener::bind(&bind_addr).await.map_err(|e| {
+            SetupError::Config(format!(
+                "Cannot bind to {} for OAuth callback (port {} in use?): {}",
+                bind_addr, CODEX_CALLBACK_PORT, e
+            ))
+        })?;
+
+        println!();
+        print_info("Opening ChatGPT authentication...");
+        println!();
+        println!("  {}", oauth_result.url);
+        println!();
+
+        if let Err(e) = open::that(&oauth_result.url) {
+            tracing::debug!("Could not open browser: {}", e);
+            println!("(Could not open browser automatically, please copy the URL above)");
+        } else {
+            println!("(Opening browser...)");
+        }
+        println!();
+        print_info("Waiting for ChatGPT authentication...");
+
+        // Wait for the authorization code from the browser redirect
+        let code = oauth_defaults::wait_for_callback(
+            listener,
+            "/callback",
+            "code",
+            "ChatGPT Codex",
+            Some(&oauth_result.state),
+        )
+        .await
+        .map_err(|e| SetupError::Auth(format!("OAuth callback error: {}", e)))?;
+
+        print_info("Exchanging authorization code for tokens...");
+
+        // Exchange code for access + refresh tokens
+        let token_response = oauth_defaults::exchange_oauth_code(
+            OPENAI_TOKEN_URL,
+            OPENAI_CODEX_CLIENT_ID,
+            None, // public client, no client secret
+            &code,
+            &redirect_uri,
+            oauth_result.code_verifier.as_deref(),
+            "access_token",
+        )
+        .await
+        .map_err(|e| SetupError::Auth(format!("Token exchange failed: {}", e)))?;
+
+        // Store tokens in encrypted secrets store
+        let access_token = SecretString::from(token_response.access_token);
+        if let Ok(ctx) = self.init_secrets_context().await {
+            ctx.save_secret("llm_codex_access_token", &access_token)
+                .await
+                .map_err(|e| SetupError::Config(format!("Failed to save access token: {}", e)))?;
+            if let Some(ref rt) = token_response.refresh_token {
+                let refresh = SecretString::from(rt.clone());
+                if let Err(e) = ctx.save_secret("llm_codex_refresh_token", &refresh).await {
+                    tracing::warn!("Failed to save Codex refresh token: {}", e);
+                }
+            }
+            print_success("Access token encrypted and saved");
+        } else {
+            print_info(
+                "Secrets not available. Set OPENAI_CODEX_ACCESS_TOKEN in your environment.",
+            );
+        }
+
+        print_success("ChatGPT Codex configured");
+        Ok(())
+    }
+
+
     ///
     /// Branches on the selected LLM backend and fetches models from the
     /// appropriate provider API, with static defaults as fallback.
@@ -1174,6 +1319,28 @@ impl SetupWizard {
                 }
                 self.settings.selected_model = Some(model_id.clone());
                 print_success(&format!("Selected {}", model_id));
+            }
+            "codex" => {
+                let models: Vec<(String, String)> = vec![
+                    (
+                        "codex-mini-latest".into(),
+                        "Codex Mini (latest, fast)".into(),
+                    ),
+                    (
+                        "gpt-5.3-codex".into(),
+                        "GPT-5.3 Codex (flagship)".into(),
+                    ),
+                    ("gpt-5.2-codex".into(), "GPT-5.2 Codex".into()),
+                    (
+                        "gpt-5.1-codex".into(),
+                        "GPT-5.1 Codex".into(),
+                    ),
+                    (
+                        "gpt-5.1-codex-mini".into(),
+                        "GPT-5.1 Codex Mini (fast)".into(),
+                    ),
+                ];
+                self.select_from_model_list(&models)?;
             }
             _ => {
                 // NEAR AI: use existing provider list_models()
@@ -1278,6 +1445,7 @@ impl SetupWizard {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            codex: None,
         };
 
         match create_llm_provider(&config, session) {
@@ -2288,6 +2456,7 @@ impl SetupWizard {
                 "openai" => "OpenAI",
                 "ollama" => "Ollama",
                 "openai_compatible" => "OpenAI-compatible",
+                "codex" => "ChatGPT Codex",
                 other => other,
             };
             println!("  Provider: {}", display);

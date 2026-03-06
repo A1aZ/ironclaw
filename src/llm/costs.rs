@@ -24,6 +24,8 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
         "gpt-5.1-codex-mini" => Some((dec!(0.0000003), dec!(0.0000012))),
         "gpt-5-codex" | "gpt-5-pro" | "gpt-5" => Some((dec!(0.000002), dec!(0.000008))),
         "gpt-5-mini" | "gpt-5-nano" => Some((dec!(0.0000003), dec!(0.0000012))),
+        // OpenAI — Codex subscription models (ChatGPT Plus/Pro OAuth access)
+        "codex-mini-latest" | "codex-mini" => Some((dec!(0.0000015), dec!(0.000006))),
         // OpenAI — GPT-4.x
         "gpt-4.1" => Some((dec!(0.000002), dec!(0.000008))),
         "gpt-4.1-mini" => Some((dec!(0.0000004), dec!(0.0000016))),

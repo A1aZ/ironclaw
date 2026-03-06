@@ -26,6 +26,8 @@ pub enum LlmBackend {
     OpenAiCompatible,
     /// Tinfoil private inference
     Tinfoil,
+    /// ChatGPT Codex subscription -- OAuth access token from ChatGPT login
+    Codex,
 }
 
 impl std::str::FromStr for LlmBackend {
@@ -39,8 +41,9 @@ impl std::str::FromStr for LlmBackend {
             "ollama" => Ok(Self::Ollama),
             "openai_compatible" | "openai-compatible" | "compatible" => Ok(Self::OpenAiCompatible),
             "tinfoil" => Ok(Self::Tinfoil),
+            "codex" | "openai_codex" | "openai-codex" | "chatgpt_codex" => Ok(Self::Codex),
             _ => Err(format!(
-                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil",
+                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil, codex",
                 s
             )),
         }
@@ -56,6 +59,7 @@ impl std::fmt::Display for LlmBackend {
             Self::Ollama => write!(f, "ollama"),
             Self::OpenAiCompatible => write!(f, "openai_compatible"),
             Self::Tinfoil => write!(f, "tinfoil"),
+            Self::Codex => write!(f, "codex"),
         }
     }
 }
@@ -73,6 +77,7 @@ impl LlmBackend {
             Self::Ollama => "OLLAMA_MODEL",
             Self::OpenAiCompatible => "LLM_MODEL",
             Self::Tinfoil => "TINFOIL_MODEL",
+            Self::Codex => "OPENAI_CODEX_MODEL",
         }
     }
 }
@@ -120,6 +125,27 @@ pub struct TinfoilConfig {
     pub model: String,
 }
 
+/// Configuration for ChatGPT Codex subscription access.
+///
+/// Authenticates via an OAuth access token obtained by logging into ChatGPT
+/// (Plus/Pro/Team/Enterprise) through the browser-based OAuth flow, rather
+/// than a developer API key. This unlocks subscriber-exclusive models such
+/// as `codex-mini-latest` and the GPT-5.x Codex family.
+///
+/// Obtain a token via the interactive setup wizard (`ironclaw setup`) or set
+/// `OPENAI_CODEX_ACCESS_TOKEN` in the environment directly.
+#[derive(Debug, Clone)]
+pub struct CodexConfig {
+    /// OAuth access token from ChatGPT login (not an API key).
+    pub access_token: SecretString,
+    /// Optional refresh token for automatic access-token renewal.
+    pub refresh_token: Option<SecretString>,
+    /// Model to use (default: `codex-mini-latest`).
+    pub model: String,
+    /// Base URL for the OpenAI API (default: `https://api.openai.com/v1`).
+    pub base_url: String,
+}
+
 /// LLM provider configuration.
 ///
 /// NEAR AI remains the default backend. Users can switch to other providers
@@ -140,6 +166,8 @@ pub struct LlmConfig {
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
     /// Tinfoil config (populated when backend=tinfoil)
     pub tinfoil: Option<TinfoilConfig>,
+    /// ChatGPT Codex subscription config (populated when backend=codex)
+    pub codex: Option<CodexConfig>,
 }
 
 /// NEAR AI configuration.
@@ -226,6 +254,7 @@ impl LlmConfig {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            codex: None,
         }
     }
 
@@ -384,6 +413,31 @@ impl LlmConfig {
             None
         };
 
+        let codex = if backend == LlmBackend::Codex {
+            let access_token = optional_env("OPENAI_CODEX_ACCESS_TOKEN")?
+                .map(SecretString::from)
+                .ok_or_else(|| ConfigError::MissingRequired {
+                    key: "OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+                    hint: "Set OPENAI_CODEX_ACCESS_TOKEN when LLM_BACKEND=codex. \
+                           Obtain this token via `ironclaw setup` or by logging into \
+                           ChatGPT and extracting your session access token."
+                        .to_string(),
+                })?;
+            let refresh_token =
+                optional_env("OPENAI_CODEX_REFRESH_TOKEN")?.map(SecretString::from);
+            let model = Self::resolve_model("OPENAI_CODEX_MODEL", settings, "codex-mini-latest")?;
+            let base_url = optional_env("OPENAI_CODEX_BASE_URL")?
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            Some(CodexConfig {
+                access_token,
+                refresh_token,
+                model,
+                base_url,
+            })
+        } else {
+            None
+        };
+
         Ok(Self {
             backend,
             nearai,
@@ -392,6 +446,7 @@ impl LlmConfig {
             ollama,
             openai_compatible,
             tinfoil,
+            codex,
         })
     }
 }
@@ -639,5 +694,122 @@ mod tests {
             compat.model, "llama3.2",
             "model name with dot must not be truncated"
         );
+    }
+
+    /// Clear all codex-related env vars.
+    fn clear_codex_env() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("OPENAI_CODEX_ACCESS_TOKEN");
+            std::env::remove_var("OPENAI_CODEX_REFRESH_TOKEN");
+            std::env::remove_var("OPENAI_CODEX_MODEL");
+            std::env::remove_var("OPENAI_CODEX_BASE_URL");
+        }
+    }
+
+    #[test]
+    fn codex_backend_parses_from_string() {
+        assert_eq!("codex".parse::<LlmBackend>().unwrap(), LlmBackend::Codex);
+        assert_eq!(
+            "openai_codex".parse::<LlmBackend>().unwrap(),
+            LlmBackend::Codex
+        );
+        assert_eq!(
+            "chatgpt_codex".parse::<LlmBackend>().unwrap(),
+            LlmBackend::Codex
+        );
+    }
+
+    #[test]
+    fn codex_backend_display() {
+        assert_eq!(LlmBackend::Codex.to_string(), "codex");
+    }
+
+    #[test]
+    fn codex_backend_model_env_var() {
+        assert_eq!(LlmBackend::Codex.model_env_var(), "OPENAI_CODEX_MODEL");
+    }
+
+    #[test]
+    fn codex_config_resolved_from_env() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_codex_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "codex");
+            std::env::set_var("OPENAI_CODEX_ACCESS_TOKEN", "test-access-token");
+            std::env::set_var("OPENAI_CODEX_MODEL", "codex-mini-latest");
+        }
+
+        let settings = Settings::default();
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(cfg.backend, LlmBackend::Codex);
+        let codex = cfg.codex.expect("codex config should be present");
+        assert_eq!(codex.model, "codex-mini-latest");
+        assert_eq!(codex.base_url, "https://api.openai.com/v1");
+
+        clear_codex_env();
+    }
+
+    #[test]
+    fn codex_config_uses_default_model_when_unset() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_codex_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "codex");
+            std::env::set_var("OPENAI_CODEX_ACCESS_TOKEN", "test-access-token");
+        }
+
+        let settings = Settings::default();
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let codex = cfg.codex.expect("codex config should be present");
+        assert_eq!(codex.model, "codex-mini-latest");
+
+        clear_codex_env();
+    }
+
+    #[test]
+    fn codex_config_uses_selected_model_from_settings() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_codex_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "codex");
+            std::env::set_var("OPENAI_CODEX_ACCESS_TOKEN", "test-access-token");
+        }
+
+        let settings = Settings {
+            selected_model: Some("gpt-5.3-codex".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let codex = cfg.codex.expect("codex config should be present");
+        assert_eq!(codex.model, "gpt-5.3-codex");
+
+        clear_codex_env();
+    }
+
+    #[test]
+    fn codex_config_errors_without_access_token() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_codex_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "codex");
+        }
+
+        let settings = Settings::default();
+        let result = LlmConfig::resolve(&settings);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("OPENAI_CODEX_ACCESS_TOKEN"),
+            "error should mention OPENAI_CODEX_ACCESS_TOKEN: {}",
+            err
+        );
+
+        clear_codex_env();
     }
 }
