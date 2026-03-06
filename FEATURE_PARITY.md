@@ -222,6 +222,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Tinfoil | ❌ | ✅ | - | Private inference provider (IronClaw-only) |
 | OpenAI-compatible | ❌ | ✅ | - | Generic OpenAI-compatible endpoint (RigAdapter) |
 | Ollama (local) | ✅ | ✅ | - | via `rig::providers::ollama` (full support) |
+| OpenAI Codex | ✅ | ✅ | - | Cloud coding agent; `codex-mini-latest` via Chat Completions API |
 | Perplexity | ✅ | ❌ | P3 | Freshness parameter for web_search |
 | MiniMax | ✅ | ❌ | P3 | Regional endpoint selection |
 | GLM-5 | ✅ | ❌ | P3 | |
@@ -522,6 +523,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ Shell env scrubbing + command injection detection
 - ✅ Tinfoil private inference provider
 - ✅ OpenAI-compatible / OpenRouter provider support
+- ✅ OpenAI Codex provider (`codex-mini-latest`, direct Chat Completions API)
 
 ### P1 - High Priority
 - ❌ Slack channel (real implementation)
@@ -579,7 +581,8 @@ IronClaw intentionally differs from OpenClaw in these ways:
 5. **No mobile/desktop apps**: Focus on server-side and CLI initially
 6. **WASM channels**: Novel extension mechanism not in OpenClaw
 7. **Tinfoil private inference**: IronClaw-only provider for private/encrypted inference
-8. **GitHub WASM tool**: Native GitHub integration as WASM tool
-9. **Prompt-based skills**: Different approach than OpenClaw capability bundles (trust gating, attenuation)
+8. **OpenAI Codex provider**: First-class support for OpenAI's cloud coding agent (`codex-mini-latest`)
+9. **GitHub WASM tool**: Native GitHub integration as WASM tool
+10. **Prompt-based skills**: Different approach than OpenClaw capability bundles (trust gating, attenuation)
 
 These are intentional architectural choices, not gaps to be filled.

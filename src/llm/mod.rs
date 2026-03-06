@@ -62,6 +62,7 @@ pub fn create_llm_provider(
         LlmBackend::Ollama => create_ollama_provider(config),
         LlmBackend::OpenAiCompatible => create_openai_compatible_provider(config),
         LlmBackend::Tinfoil => create_tinfoil_provider(config),
+        LlmBackend::Codex => create_codex_provider(config),
     }
 }
 
@@ -210,6 +211,42 @@ fn create_tinfoil_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
     let model = client.completion_model(&tf.model);
     tracing::info!("Using Tinfoil private inference (model: {})", tf.model);
     Ok(Arc::new(RigAdapter::new(model, &tf.model)))
+}
+
+const CODEX_BASE_URL: &str = "https://api.openai.com";
+
+fn create_codex_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let codex = config
+        .codex
+        .as_ref()
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: "codex".to_string(),
+        })?;
+
+    use rig::providers::openai;
+
+    let base_url = codex
+        .base_url
+        .as_deref()
+        .unwrap_or(CODEX_BASE_URL);
+
+    let client: openai::CompletionsClient = openai::Client::builder()
+        .base_url(base_url)
+        .api_key(codex.api_key.expose_secret())
+        .build()
+        .map_err(|e| LlmError::RequestFailed {
+            provider: "codex".to_string(),
+            reason: format!("Failed to create Codex client: {}", e),
+        })?
+        .completions_api();
+
+    let model = client.completion_model(&codex.model);
+    tracing::info!(
+        "Using OpenAI Codex (chat completions, base_url: {}, model: {})",
+        base_url,
+        codex.model
+    );
+    Ok(Arc::new(RigAdapter::new(model, &codex.model)))
 }
 
 fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -489,6 +526,7 @@ mod tests {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            codex: None,
         }
     }
 
@@ -527,5 +565,33 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_create_codex_provider_fails_without_config() {
+        let mut config = test_llm_config();
+        config.backend = LlmBackend::Codex;
+        // codex field is None — should return an error
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+        let result = create_llm_provider(&config, session);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_codex_provider_succeeds_with_config() {
+        use crate::config::CodexConfig;
+        use secrecy::SecretString;
+
+        let mut config = test_llm_config();
+        config.backend = LlmBackend::Codex;
+        config.codex = Some(CodexConfig {
+            api_key: SecretString::from("sk-test-key"),
+            model: "codex-mini-latest".to_string(),
+            base_url: None,
+        });
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+        let result = create_llm_provider(&config, session);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().model_name(), "codex-mini-latest");
     }
 }
