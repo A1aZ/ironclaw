@@ -697,6 +697,11 @@ mod tests {
     }
 
     /// Clear all codex-related env vars.
+    /// Clear all Codex-related env vars including the shared `LLM_BACKEND`.
+    ///
+    /// Mirrors `clear_openai_compatible_env` and `clear_ollama_env`: every env
+    /// var that a Codex test may set is removed here so the following test
+    /// starts from a clean slate. All callers must hold `ENV_MUTEX`.
     fn clear_codex_env() {
         // SAFETY: Only called under ENV_MUTEX in tests.
         unsafe {
