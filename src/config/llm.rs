@@ -26,6 +26,8 @@ pub enum LlmBackend {
     OpenAiCompatible,
     /// Tinfoil private inference
     Tinfoil,
+    /// OpenAI Codex (cloud coding agent, Chat Completions API)
+    Codex,
 }
 
 impl std::str::FromStr for LlmBackend {
@@ -39,8 +41,9 @@ impl std::str::FromStr for LlmBackend {
             "ollama" => Ok(Self::Ollama),
             "openai_compatible" | "openai-compatible" | "compatible" => Ok(Self::OpenAiCompatible),
             "tinfoil" => Ok(Self::Tinfoil),
+            "codex" | "chatgpt-codex" | "openai-codex" => Ok(Self::Codex),
             _ => Err(format!(
-                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil",
+                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil, codex",
                 s
             )),
         }
@@ -56,6 +59,7 @@ impl std::fmt::Display for LlmBackend {
             Self::Ollama => write!(f, "ollama"),
             Self::OpenAiCompatible => write!(f, "openai_compatible"),
             Self::Tinfoil => write!(f, "tinfoil"),
+            Self::Codex => write!(f, "codex"),
         }
     }
 }
@@ -73,6 +77,7 @@ impl LlmBackend {
             Self::Ollama => "OLLAMA_MODEL",
             Self::OpenAiCompatible => "LLM_MODEL",
             Self::Tinfoil => "TINFOIL_MODEL",
+            Self::Codex => "CODEX_MODEL",
         }
     }
 }
@@ -120,6 +125,18 @@ pub struct TinfoilConfig {
     pub model: String,
 }
 
+/// Configuration for OpenAI Codex (cloud coding agent).
+///
+/// Codex models (e.g. `codex-mini-latest`) are accessible via the standard
+/// OpenAI Chat Completions API using an OpenAI API key.
+#[derive(Debug, Clone)]
+pub struct CodexConfig {
+    pub api_key: SecretString,
+    pub model: String,
+    /// Optional base URL override (default: `https://api.openai.com`).
+    pub base_url: Option<String>,
+}
+
 /// LLM provider configuration.
 ///
 /// NEAR AI remains the default backend. Users can switch to other providers
@@ -140,6 +157,8 @@ pub struct LlmConfig {
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
     /// Tinfoil config (populated when backend=tinfoil)
     pub tinfoil: Option<TinfoilConfig>,
+    /// Codex config (populated when backend=codex)
+    pub codex: Option<CodexConfig>,
 }
 
 /// NEAR AI configuration.
@@ -226,6 +245,7 @@ impl LlmConfig {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            codex: None,
         }
     }
 
@@ -384,6 +404,24 @@ impl LlmConfig {
             None
         };
 
+        let codex = if backend == LlmBackend::Codex {
+            let api_key = optional_env("CODEX_API_KEY")?
+                .map(SecretString::from)
+                .ok_or_else(|| ConfigError::MissingRequired {
+                    key: "CODEX_API_KEY".to_string(),
+                    hint: "Set CODEX_API_KEY when LLM_BACKEND=codex".to_string(),
+                })?;
+            let model = Self::resolve_model("CODEX_MODEL", settings, "codex-mini-latest")?;
+            let base_url = optional_env("CODEX_BASE_URL")?;
+            Some(CodexConfig {
+                api_key,
+                model,
+                base_url,
+            })
+        } else {
+            None
+        };
+
         Ok(Self {
             backend,
             nearai,
@@ -392,6 +430,7 @@ impl LlmConfig {
             ollama,
             openai_compatible,
             tinfoil,
+            codex,
         })
     }
 }
@@ -639,5 +678,127 @@ mod tests {
             compat.model, "llama3.2",
             "model name with dot must not be truncated"
         );
+    }
+
+    /// Clear all Codex-related env vars.
+    fn clear_codex_env() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("CODEX_API_KEY");
+            std::env::remove_var("CODEX_MODEL");
+            std::env::remove_var("CODEX_BASE_URL");
+        }
+    }
+
+    #[test]
+    fn codex_backend_parses_from_str() {
+        assert_eq!("codex".parse::<LlmBackend>().unwrap(), LlmBackend::Codex);
+        assert_eq!(
+            "chatgpt-codex".parse::<LlmBackend>().unwrap(),
+            LlmBackend::Codex
+        );
+        assert_eq!(
+            "openai-codex".parse::<LlmBackend>().unwrap(),
+            LlmBackend::Codex
+        );
+        assert_eq!(LlmBackend::Codex.to_string(), "codex");
+        assert_eq!(LlmBackend::Codex.model_env_var(), "CODEX_MODEL");
+    }
+
+    #[test]
+    fn codex_config_resolved_from_env() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_codex_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "codex");
+            std::env::set_var("CODEX_API_KEY", "sk-test-key-123");
+            std::env::set_var("CODEX_MODEL", "codex-mini-latest");
+        }
+
+        let settings = Settings::default();
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+
+        assert_eq!(cfg.backend, LlmBackend::Codex);
+        let codex = cfg.codex.expect("codex config should be present");
+        assert_eq!(codex.model, "codex-mini-latest");
+        assert!(codex.base_url.is_none());
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("CODEX_API_KEY");
+            std::env::remove_var("CODEX_MODEL");
+        }
+    }
+
+    #[test]
+    fn codex_config_uses_default_model_when_unset() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_codex_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "codex");
+            std::env::set_var("CODEX_API_KEY", "sk-test-key-123");
+        }
+
+        let settings = Settings::default();
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+
+        let codex = cfg.codex.expect("codex config should be present");
+        assert_eq!(codex.model, "codex-mini-latest");
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("CODEX_API_KEY");
+        }
+    }
+
+    #[test]
+    fn codex_config_requires_api_key() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_codex_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "codex");
+        }
+
+        let settings = Settings::default();
+        let result = LlmConfig::resolve(&settings);
+        assert!(result.is_err(), "codex without CODEX_API_KEY should fail");
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+        }
+    }
+
+    #[test]
+    fn codex_base_url_override() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_codex_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "codex");
+            std::env::set_var("CODEX_API_KEY", "sk-test-key-123");
+            std::env::set_var("CODEX_BASE_URL", "https://custom.openai-proxy.example.com");
+        }
+
+        let settings = Settings::default();
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let codex = cfg.codex.expect("codex config should be present");
+        assert_eq!(
+            codex.base_url.as_deref(),
+            Some("https://custom.openai-proxy.example.com")
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("CODEX_API_KEY");
+            std::env::remove_var("CODEX_BASE_URL");
+        }
     }
 }

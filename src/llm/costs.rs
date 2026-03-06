@@ -24,6 +24,8 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
         "gpt-5.1-codex-mini" => Some((dec!(0.0000003), dec!(0.0000012))),
         "gpt-5-codex" | "gpt-5-pro" | "gpt-5" => Some((dec!(0.000002), dec!(0.000008))),
         "gpt-5-mini" | "gpt-5-nano" => Some((dec!(0.0000003), dec!(0.0000012))),
+        // OpenAI Codex (cloud coding agent)
+        "codex-mini-latest" | "codex-mini" => Some((dec!(0.0000015), dec!(0.000006))),
         // OpenAI — GPT-4.x
         "gpt-4.1" => Some((dec!(0.000002), dec!(0.000008))),
         "gpt-4.1-mini" => Some((dec!(0.0000004), dec!(0.0000016))),
@@ -146,5 +148,14 @@ mod tests {
     fn test_provider_prefix_stripped() {
         // "openai/gpt-4o" should resolve to same as "gpt-4o"
         assert_eq!(model_cost("openai/gpt-4o"), model_cost("gpt-4o"));
+    }
+
+    #[test]
+    fn test_codex_model_costs() {
+        let (input, output) = model_cost("codex-mini-latest").unwrap();
+        assert!(input > Decimal::ZERO);
+        assert!(output > input);
+        // codex-mini-latest and codex-mini should be the same price
+        assert_eq!(model_cost("codex-mini-latest"), model_cost("codex-mini"));
     }
 }

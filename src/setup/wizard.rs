@@ -799,6 +799,7 @@ impl SetupWizard {
                     "openai" => "OpenAI",
                     "ollama" => "Ollama (local)",
                     "openai_compatible" => "OpenAI-compatible endpoint",
+                    "codex" => "OpenAI Codex",
                     other => other,
                 }
             };
@@ -807,7 +808,7 @@ impl SetupWizard {
 
             let is_known = matches!(
                 current.as_str(),
-                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible"
+                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible" | "codex"
             );
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
@@ -821,6 +822,7 @@ impl SetupWizard {
                     "openai" => return self.setup_openai().await,
                     "ollama" => return self.setup_ollama(),
                     "openai_compatible" => return self.setup_openai_compatible().await,
+                    "codex" => return self.setup_codex().await,
                     _ => {
                         return Err(SetupError::Config(format!(
                             "Unhandled provider: {}",
@@ -848,6 +850,7 @@ impl SetupWizard {
             "Ollama           - local models, no API key needed",
             "OpenRouter       - 200+ models via single API key",
             "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, etc.)",
+            "Codex            - OpenAI Codex coding agent (direct API key)",
         ];
 
         let choice = select_one("Provider:", options).map_err(SetupError::Io)?;
@@ -859,6 +862,7 @@ impl SetupWizard {
             3 => self.setup_ollama()?,
             4 => self.setup_openrouter().await?,
             5 => self.setup_openai_compatible().await?,
+            6 => self.setup_codex().await?,
             _ => return Err(SetupError::Config("Invalid provider selection".to_string())),
         }
 
@@ -946,6 +950,19 @@ impl SetupWizard {
             "OpenAI API key",
             "https://platform.openai.com/api-keys",
             None,
+        )
+        .await
+    }
+
+    /// OpenAI Codex provider setup: collect API key and store in secrets.
+    async fn setup_codex(&mut self) -> Result<(), SetupError> {
+        self.setup_api_key_provider(
+            "codex",
+            "CODEX_API_KEY",
+            "llm_codex_api_key",
+            "OpenAI API key (for Codex)",
+            "https://platform.openai.com/api-keys",
+            Some("OpenAI Codex"),
         )
         .await
     }
@@ -1175,6 +1192,17 @@ impl SetupWizard {
                 self.settings.selected_model = Some(model_id.clone());
                 print_success(&format!("Selected {}", model_id));
             }
+            "codex" => {
+                let default_models: Vec<(String, String)> = vec![
+                    (
+                        "codex-mini-latest".into(),
+                        "codex-mini-latest (default, fast coding agent)".into(),
+                    ),
+                    ("o4-mini".into(), "o4-mini (reasoning, fast)".into()),
+                    ("o3".into(), "o3 (reasoning, powerful)".into()),
+                ];
+                self.select_from_model_list(&default_models)?;
+            }
             _ => {
                 // NEAR AI: use existing provider list_models()
                 let fetched = self.fetch_nearai_models().await;
@@ -1278,6 +1306,7 @@ impl SetupWizard {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            codex: None,
         };
 
         match create_llm_provider(&config, session) {
