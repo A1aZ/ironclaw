@@ -43,7 +43,7 @@ use std::sync::Arc;
 use rig::client::CompletionClient;
 use secrecy::ExposeSecret;
 
-use crate::config::{LlmBackend, LlmConfig, NearAiConfig};
+use crate::config::{CodexConfig, LlmBackend, LlmConfig, NearAiConfig};
 use crate::error::LlmError;
 
 /// Create an LLM provider based on configuration.
@@ -62,6 +62,7 @@ pub fn create_llm_provider(
         LlmBackend::Ollama => create_ollama_provider(config),
         LlmBackend::OpenAiCompatible => create_openai_compatible_provider(config),
         LlmBackend::Tinfoil => create_tinfoil_provider(config),
+        LlmBackend::Codex => create_codex_provider(config),
     }
 }
 
@@ -210,6 +211,49 @@ fn create_tinfoil_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
     let model = client.completion_model(&tf.model);
     tracing::info!("Using Tinfoil private inference (model: {})", tf.model);
     Ok(Arc::new(RigAdapter::new(model, &tf.model)))
+}
+
+fn create_codex_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let codex = config
+        .codex
+        .as_ref()
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: "codex".to_string(),
+        })?;
+
+    create_codex_provider_with_config(codex)
+}
+
+/// Create a ChatGPT Codex provider from a `CodexConfig` directly.
+///
+/// The Codex backend authenticates with the OpenAI Chat Completions API using
+/// an OAuth access token (obtained via ChatGPT login) instead of a developer
+/// API key. This grants access to subscriber-exclusive models such as
+/// `codex-mini-latest` and the GPT-5.x Codex family.
+pub fn create_codex_provider_with_config(
+    config: &CodexConfig,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    use rig::providers::openai;
+
+    // The ChatGPT Codex API is OpenAI-compatible: the OAuth access token is
+    // passed as the Bearer token in the same way an API key would be.
+    let client: openai::CompletionsClient = openai::Client::builder()
+        .base_url(&config.base_url)
+        .api_key(config.access_token.expose_secret())
+        .build()
+        .map_err(|e| LlmError::RequestFailed {
+            provider: "codex".to_string(),
+            reason: format!("Failed to create Codex client: {}", e),
+        })?
+        .completions_api();
+
+    let model = client.completion_model(&config.model);
+    tracing::info!(
+        "Using ChatGPT Codex subscription (model: {}, base_url: {})",
+        config.model,
+        config.base_url,
+    );
+    Ok(Arc::new(RigAdapter::new(model, &config.model)))
 }
 
 fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -489,6 +533,7 @@ mod tests {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            codex: None,
         }
     }
 
@@ -527,5 +572,23 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_create_codex_provider_with_config_creates_provider() {
+        use crate::config::CodexConfig;
+        use secrecy::SecretString;
+
+        let codex_config = CodexConfig {
+            access_token: SecretString::from("test-access-token".to_string()),
+            refresh_token: None,
+            model: "codex-mini-latest".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+        };
+
+        let result = create_codex_provider_with_config(&codex_config);
+        assert!(result.is_ok());
+        let provider = result.unwrap();
+        assert_eq!(provider.model_name(), "codex-mini-latest");
     }
 }

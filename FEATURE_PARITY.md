@@ -215,6 +215,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | NEAR AI | ✅ | ✅ | - | Primary provider |
 | Anthropic (Claude) | ✅ | 🚧 | - | Via NEAR AI proxy; Opus 4.5, Sonnet 4, Sonnet 4.6 |
 | OpenAI | ✅ | 🚧 | - | Via NEAR AI proxy |
+| ChatGPT Codex (subscription) | ✅ | ✅ | - | OAuth PKCE flow; ChatGPT Plus/Pro subscriber access to `codex-mini-latest`, GPT-5.x |
 | AWS Bedrock | ✅ | ❌ | P3 | |
 | Google Gemini | ✅ | ❌ | P3 | |
 | NVIDIA API | ✅ | ❌ | P3 | New provider |
@@ -522,6 +523,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ Shell env scrubbing + command injection detection
 - ✅ Tinfoil private inference provider
 - ✅ OpenAI-compatible / OpenRouter provider support
+- ✅ ChatGPT Codex subscription provider (OAuth PKCE, `LLM_BACKEND=codex`)
 
 ### P1 - High Priority
 - ❌ Slack channel (real implementation)
